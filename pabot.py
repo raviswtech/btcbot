@@ -273,8 +273,19 @@ def get_all_open_orders() -> tuple[bool, object]:
             and not o.get("bracket_order")       # or are flagged as bracket children
         ]
         stop_orders  = [o for o in orders if o["order_type"] in ("stop_order", "stop_limit_order")]
+        tp_orders    = [
+            o for o in orders
+            if o["order_type"] == "limit_order"
+            and o.get("bracket_order")           # bracket TP children are flagged as bracket orders
+            and not o.get("stop_price")          # TP orders have no stop_price (unlike SL)
+        ]
         has_limit    = len(limit_orders) > 0
         stop_order   = stop_orders[0] if stop_orders else None
+        tp_order     = tp_orders[0]   if tp_orders   else None
+        log("ORDERS", "Open orders fetched", "SYSTEM",
+            limit_count=len(limit_orders), sl_count=len(stop_orders),
+            tp_count=len(tp_orders),
+            tp_price=float(tp_order["limit_price"]) if tp_order else None)
         return has_limit, stop_order, orders
     except Exception as e:
         log("API", "get_all_open_orders failed — assuming limit exists for safety",
@@ -409,16 +420,30 @@ def add_pivot_labels(df: pd.DataFrame, swing_lows: list, swing_highs: list):
 def execute_entry(side: str, entry: float, stop: float, size: int, key: str):
     if size <= 0: return
     sl_limit = stop * 0.998 if side == "buy" else stop * 1.002
+
+    # 1:2 Risk/Reward Take Profit
+    risk = abs(entry - stop)
+    if side == "buy":
+        take_profit       = entry + 2 * risk
+        take_profit_limit = take_profit * 0.999   # slightly below TP to ensure limit fill
+    else:
+        take_profit       = entry - 2 * risk
+        take_profit_limit = take_profit * 1.001   # slightly above TP to ensure limit fill
+
     try:
-        log("TRADE", "Placing MARKET entry + SL bracket", key,
-            side=side, size=size, expected_entry=round(entry, 1), stop=round(stop, 1))
+        log("TRADE", "Placing MARKET entry + SL + TP bracket (1:2 RR)", key,
+            side=side, size=size, expected_entry=round(entry, 1),
+            stop=round(stop, 1), take_profit=round(take_profit, 1),
+            risk=round(risk, 1), reward=round(2 * risk, 1))
         response = signed_request("POST", "/v2/orders", payload={
-            "product_id":                    PRODUCT_ID,
-            "size":                          size,
-            "side":                          side,
-            "order_type":                    "market_order",
-            "bracket_stop_loss_price":       str(round(stop, 1)),
-            "bracket_stop_loss_limit_price": str(round(sl_limit, 1))
+            "product_id":                      PRODUCT_ID,
+            "size":                            size,
+            "side":                            side,
+            "order_type":                      "market_order",
+            "bracket_stop_loss_price":         str(round(stop, 1)),
+            "bracket_stop_loss_limit_price":   str(round(sl_limit, 1)),
+            "bracket_take_profit_price":       str(round(take_profit, 1)),
+            "bracket_take_profit_limit_price": str(round(take_profit_limit, 1))
         })
         log("ORDER", "Market Entry placed", key, response=response)
     except Exception as e:
